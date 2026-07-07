@@ -138,7 +138,10 @@ def render_page_from_bytes(pdf_bytes, page_num, dpi=150):
     raise RuntimeError(f"Rendering fehlgeschlagen für Seite {page_num}")
 
 def transcribe_page(client, jpeg_bytes, page_num):
+    """Returns (result_dict, error_log_str). result_dict is None on failure."""
     b64 = base64.standard_b64encode(jpeg_bytes).decode()
+    error_log = []
+    raw = ""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.messages.create(
@@ -150,18 +153,23 @@ def transcribe_page(client, jpeg_bytes, page_num):
                 ]}]
             )
             raw = response.content[0].text.strip()
-            raw = re.sub(r'^```json\s*', '', raw)
-            raw = re.sub(r'\s*```$', '', raw)
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            cleaned = re.sub(r'^```json\s*', '', raw)
+            cleaned = re.sub(r'\s*```$', '', cleaned)
+            return json.loads(cleaned), None
+        except json.JSONDecodeError as e:
+            msg = f"Versuch {attempt}: JSON-Fehler – {e}\nRoher API-Output:\n{raw}"
+            error_log.append(msg)
             if attempt == MAX_RETRIES:
-                return None
+                return None, "\n".join(error_log)
             time.sleep(3)
-        except Exception:
+        except Exception as e:
+            import traceback
+            msg = f"Versuch {attempt}: API-Fehler – {e}\n{traceback.format_exc()}"
+            error_log.append(msg)
             if attempt == MAX_RETRIES:
-                return None
+                return None, "\n".join(error_log)
             time.sleep(5 * attempt)
-    return None
+    return None, "\n".join(error_log)
 
 def correct_text(client, raw_text, book="", author=""):
     if not raw_text or not raw_text.strip():
@@ -373,6 +381,8 @@ if pdf_file:
         st.warning("Bitte Buchtitel eingeben.")
         st.stop()
 
+    debug_mode = st.checkbox("🔍 Debug-Modus (zeigt rohen API-Output bei Fehlern)")
+
     if st.button("▶ Transkription starten", type="primary", use_container_width=True):
 
         pages_data = []
@@ -400,9 +410,11 @@ if pdf_file:
                 continue
 
             # Transkription
-            result = transcribe_page(client, jpeg, pn)
+            result, err = transcribe_page(client, jpeg, pn)
             if result is None:
                 log_lines.append(f"✗ Seite {pn}: Transkription fehlgeschlagen")
+                if debug_mode and err:
+                    log_lines.append(f"  DEBUG Seite {pn}:\n{err}")
                 log.code("\n".join(log_lines))
                 skipped.append(pn)
                 continue
